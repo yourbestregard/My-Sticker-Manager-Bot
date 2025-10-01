@@ -20,7 +20,7 @@ from telegram.error import BadRequest
 
 # Konfigurasi Awal
 
-BOT_TOKEN = "8481920942:AAE2_K7cd40j_6y9impZD0ncuxNy56dxPgc"
+BOT_TOKEN = "GANTI_DENGAN_TOKEN_BOT_ANDA"
 # Nama file database JSON
 DB_FILE = "sticker_data.json"
 # Direktori untuk file sementara
@@ -70,37 +70,41 @@ def get_user_sticker_pack(user_id: int) -> str | None:
 # Fungsi Pemrosesan Media
 
 def process_media(file_path: str, media_type: str) -> tuple[str, StickerFormat] | None:
-    """Memproses gambar atau video menjadi format stiker yang valid."""
     unique_id = str(uuid.uuid4())
     
     if media_type in ['photo', 'sticker_static']:
         output_path = os.path.join(TEMP_DIR, f"{unique_id}.png")
         sticker_format = StickerFormat.STATIC
-        with Image.open(file_path) as img:
-            # Resize dengan menjaga aspek rasio
-            if img.width > img.height:
-                new_width, new_height = 512, int(512 * img.height / img.width)
-            else:
-                new_height, new_width = 512, int(512 * img.width / img.height)
-            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            img.save(output_path, "PNG")
-        return output_path, sticker_format
+        try:
+            with Image.open(file_path) as img:
+                if img.width > img.height:
+                    new_width, new_height = 512, int(512 * img.height / img.width)
+                else:
+                    new_height, new_width = 512, int(512 * img.width / img.height)
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                img.save(output_path, "PNG")
+            return output_path, sticker_format
+        except Exception as e:
+            logger.error(f"Pillow/Image processing error: {e}")
+            return None
 
     elif media_type in ['animation', 'video', 'sticker_video']:
         output_path = os.path.join(TEMP_DIR, f"{unique_id}.webm")
         sticker_format = StickerFormat.VIDEO
         try:
-            # Perintah FFmpeg untuk konversi ke stiker video (WEBM VP9)
             ffmpeg_command = [
                 'ffmpeg', '-i', file_path, '-t', '3',
                 '-vf', "scale='min(512,iw)':'min(512,ih)':force_original_aspect_ratio=decrease,fps=30,pad=512:512:-1:-1:color=black@0.0",
-                '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-an', '-y', output_path
+                '-c:v', 'libvpx-vp9', '-an', '-y', '-pix_fmt', 'yuva420p',
+                output_path
             ]
-            subprocess.run(ffmpeg_command, check=True, capture_output=True, text=True)
+            # Jalankan perintah dan tangkap output error jika ada
+            result = subprocess.run(ffmpeg_command, check=True, capture_output=True, text=True)
             return output_path, sticker_format
         except subprocess.CalledProcessError as e:
+            # Log error spesifik dari ffmpeg
             logger.error(f"FFmpeg error: {e.stderr}")
-            return None
+            return None # Kembalikan None jika ffmpeg gagal
     return None
 
 # Handler Perintah Bot
@@ -121,21 +125,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_sticker_pack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk mengatur sticker pack yang sudah ada."""
     user_id = update.effective_user.id
-    
     if not context.args:
-        await update.message.reply_text(
-            "Gagal! Mohon sertakan link sticker pack Anda.\n"
-            "Contoh: /setstickerpack https://t.me/addstickers/nama_pack_anda"
-        )
+        await update.message.reply_text("Contoh: /setstickerpack https://t.me/addstickers/nama_pack_anda")
         return
-
     pack_url = context.args[0]
     try:
         pack_name = urlparse(pack_url).path.split('/')[-1]
-        
-        if not pack_name.strip():
-            raise ValueError("Nama pack tidak valid.")
-        
+        if not pack_name.strip(): raise ValueError("Nama pack tidak valid.")
         set_user_sticker_pack(user_id, pack_name)
         await update.message.reply_text(
             f"Sticker pack Anda telah diatur ke:\n`{pack_name}`\n"
@@ -150,22 +146,19 @@ async def set_sticker_pack_command(update: Update, context: ContextTypes.DEFAULT
 # --- Alur Pembuatan Sticker Pack Baru (ConversationHandler) ---
 
 async def new_pack_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Memulai alur pembuatan pack baru, meminta judul."""
+    """Memulai alur, meminta judul."""
     await update.message.reply_text(
-        "Anda akan membuat sticker pack baru.\n"
-        "Silakan kirimkan <b>judul</b> untuk pack Anda (misal: 'Kucing Lucu Saya').\n\n"
-        "Kirim /cancel untuk membatalkan.",
+        "Anda akan membuat sticker pack baru.\nSilakan kirimkan <b>judul</b> untuk pack Anda.\n\nKirim /cancel untuk membatalkan.",
         parse_mode='HTML'
     )
     return GET_TITLE
 
 async def get_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Menyimpan judul pack dan meminta stiker pertama."""
+    """Menyimpan judul dan meminta stiker pertama."""
     title = update.message.text
     if len(title) > 64:
         await update.message.reply_text("Judul terlalu panjang (maksimal 64 karakter). Coba lagi.")
         return GET_TITLE
-        
     context.user_data['pack_title'] = title
     await update.message.reply_text(f"Judul '{title}' diterima. Sekarang, kirimkan media pertama untuk pack ini.")
     return GET_STICKER
@@ -193,37 +186,48 @@ async def get_first_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await file_obj.download_to_drive(original_file_path)
 
         processed_result = process_media(original_file_path, media_type)
-        if not processed_result: raise ValueError("Gagal memproses media.")
+        if not processed_result:
+            await processing_msg.edit_text("Terjadi kesalahan: Gagal memproses media. Mungkin formatnya tidak didukung oleh ffmpeg.")
+            return GET_STICKER # Tetap dalam state yang sama agar pengguna bisa coba lagi
+
         output_file_path, sticker_format = processed_result
         
         pack_name = f"u{user.id}_by_{bot_username}_{uuid.uuid4().hex[:4]}"
-        pack_title = context.user_data['pack_title']
+        pack_title = context.user_data['pack_title'] # Ambil judul dari context
 
         with open(output_file_path, 'rb') as sticker_file:
             sticker_to_add = InputSticker(sticker_file, ["🙂"], format=sticker_format)
+            
             await context.bot.create_new_sticker_set(
-                user.id, pack_name, pack_title, stickers=[sticker_to_add], sticker_format=sticker_format
+                user_id=user.id,
+                name=pack_name,
+                title=pack_title,
+                stickers=[sticker_to_add]
             )
         
         set_user_sticker_pack(user.id, pack_name)
         pack_link = f"https://t.me/addstickers/{pack_name}"
         await processing_msg.edit_text(
-            f"Selamat! Sticker pack '{pack_title}' berhasil dibuat: {pack_link}\n\n"
-            "Pack ini sudah diatur sebagai pack aktifmu. Gunakan /addsticker untuk menambahkan stiker lain."
+            f"Selamat! Sticker pack '{pack_title}' berhasil dibuat: {pack_link}"
         )
+
+        del context.user_data['pack_title']
         return ConversationHandler.END
+
     except Exception as e:
         logger.error(f"Gagal membuat pack baru: {e}")
-        await processing_msg.edit_text(f"Terjadi kesalahan: {e}\n\nSilakan coba lagi atau kirim /cancel.")
+        await processing_msg.edit_text(f"Terjadi kesalahan: {e}")
+        # Jangan hapus 'pack_title' agar pengguna bisa coba kirim media lain tanpa mengulang judul
         return GET_STICKER
     finally:
+        # Selalu bersihkan file temporer
         if os.path.exists(original_file_path): os.remove(original_file_path)
         if output_file_path and os.path.exists(output_file_path): os.remove(output_file_path)
-        if 'pack_title' in context.user_data: del context.user_data['pack_title']
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Membatalkan alur pembuatan pack baru."""
-    if 'pack_title' in context.user_data: del context.user_data['pack_title']
+    """Membatalkan alur pembuatan pack."""
+    if 'pack_title' in context.user_data:
+        del context.user_data['pack_title']
     await update.message.reply_text("Proses pembuatan sticker pack dibatalkan.")
     return ConversationHandler.END
 
@@ -239,7 +243,7 @@ async def add_sticker_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     pack_name = get_user_sticker_pack(user_id)
 
     if not pack_name:
-        await update.message.reply_text("Anda belum mengatur sticker pack. Silakan buat dengan /newstickerpack atau atur pack yang sudah ada dengan /setstickerpack.")
+        await update.message.reply_text("Anda belum mengatur sticker pack. Buat dulu dengan /newstickerpack atau atur dengan /setstickerpack.")
         return
 
     replied_message = update.message.reply_to_message
@@ -251,12 +255,12 @@ async def add_sticker_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         sticker = replied_message.sticker
         if sticker.is_video: media_type = 'sticker_video'
         elif sticker.is_animated:
-             await update.message.reply_text("Maaf, stiker animasi berformat .TGS tidak bisa ditambahkan ulang oleh bot.")
+             await update.message.reply_text("Maaf, stiker animasi .TGS tidak bisa ditambahkan ulang oleh bot.")
              return
         else: media_type = 'sticker_static'
         file_id = sticker.file_id
     else:
-        await update.message.reply_text("Format media tidak didukung. Harap reply ke gambar, GIF, video, atau stiker lain.")
+        await update.message.reply_text("Format media tidak didukung.")
         return
 
     processing_msg = await update.message.reply_text("Memproses media...")
@@ -268,7 +272,10 @@ async def add_sticker_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await file_obj.download_to_drive(original_file_path)
 
         processed_result = process_media(original_file_path, media_type)
-        if not processed_result: raise ValueError("Gagal memproses media.")
+        if not processed_result:
+            await processing_msg.edit_text("Terjadi kesalahan: Gagal memproses media. Pastikan format file didukung (JPG, PNG, MP4, GIF).")
+            return
+            
         output_file_path, sticker_format = processed_result
         
         with open(output_file_path, 'rb') as sticker_file:
@@ -280,17 +287,15 @@ async def add_sticker_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     except BadRequest as e:
         logger.error(f"Gagal menambah stiker (BadRequest): {e}")
-        error_message = "Oops, terjadi kesalahan."
+        error_message = f"Oops, terjadi kesalahan: {e.message}"
         if "STICKERSET_INVALID" in e.message:
-            error_message = "Sticker pack tidak ditemukan. Coba atur ulang dengan /setstickerpack."
+            error_message = "Sticker pack tidak ditemukan. Atur ulang dengan /setstickerpack."
         elif "STICKERS_TOO_MUCH" in e.message:
-            error_message = "Gagal, sticker pack sudah penuh (120 untuk stiker biasa, 50 untuk video)."
-        elif "USER_IS_BOT" in e.message:
-             error_message = "Terjadi kesalahan internal (USER_IS_BOT)."
+            error_message = "Gagal, sticker pack sudah penuh."
         await processing_msg.edit_text(error_message)
     except Exception as e:
         logger.error(f"Gagal menambah stiker (Exception): {e}")
-        await processing_msg.edit_text(f"Oops, terjadi kesalahan umum. Pastikan Anda adalah pemilik pack ini.")
+        await processing_msg.edit_text(f"Oops, terjadi kesalahan umum. Pastikan Anda adalah pemilik sah pack ini.")
     finally:
         if os.path.exists(original_file_path): os.remove(original_file_path)
         if output_file_path and os.path.exists(output_file_path): os.remove(output_file_path)
@@ -298,12 +303,8 @@ async def add_sticker_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 # --- Fungsi Utama untuk Menjalankan Bot ---
 
 def main():
-    """Fungsi utama untuk menjalankan bot."""
     os.makedirs(TEMP_DIR, exist_ok=True)
-    
     application = Application.builder().token(BOT_TOKEN).build()
-
-    # Conversation handler untuk /newstickerpack
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("newstickerpack", new_pack_start)],
         states={
@@ -312,11 +313,8 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
-
-    # Menambahkan semua handler perintah
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("start", start_command))
-    # *** PENAMBAHAN BARIS DI BAWAH INI ***
     application.add_handler(CommandHandler("help", start_command))
     application.add_handler(CommandHandler("setstickerpack", set_sticker_pack_command))
     application.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r'^/addsticker$'), add_sticker_command))
